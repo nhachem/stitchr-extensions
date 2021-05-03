@@ -15,8 +15,7 @@ export baseConfigFolder=file://$ROOT_DIR/config/
 ## using tpcds generated and adjusted data
 export baseDataFolder=$DATA_DIR/tpcds/ ## for the demo
 export defaultOutputDir=/tmp
-
-export buildDir=$HOME/devJars/stitchr-extensions/target
+export propertiesFile=demoTransforms.properties
 
 ## spark
 # export SPARK_HOME="<spark-home-if-not-set"
@@ -34,3 +33,6 @@ export STITCHR_EXTENSIONS_JAR=$buildDir/$PROJECT_NAME-$VERSION-jar-with-dependen
 ## used in bash scripts
 export PROJECT_SCALA_VERSION=2.12
 export PROJECT_SPARK_VERSION=3.0.0
+
+## PYTHON SOURCES assumes that the root is root of src code
+export PYTHONPATH=PYTHONPATH:$ROOT_DIR/python

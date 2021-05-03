@@ -14,11 +14,13 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.ml.feature.{StopWordsRemover, Tokenizer}
 import org.apache.spark.sql.DataFrame
 
+/*
 case class ColumnTransform(
     df: DataFrame,
     inputCol: String,
     outputColName: String = null
 )
+ */
 
 object DataSetColumn {
   val spark = SparkSession.builder().getOrCreate()
@@ -97,7 +99,7 @@ object DataSetColumn {
       ) // put in buckets
 
     /**
-      *
+      * tokenize the column
       * @return
       */
     def tokenizeColumn: ColumnTransform = {
@@ -151,7 +153,8 @@ object DataSetColumn {
     )
 
     /**
-      * need to add the stopwords array as an input (maybe even a DF?!)
+      * remove stop words from the text
+      *  NH: need to add the stopwords array as an input (maybe even a DF?!)
       *
       * @return
       */

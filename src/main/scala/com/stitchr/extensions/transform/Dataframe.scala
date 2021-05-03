@@ -18,17 +18,26 @@ package com.stitchr.extensions.transform
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.expr
+import org.apache.spark.sql.types.StructField
 
 object Dataframe {
   val spark: SparkSession = SparkSession.builder.getOrCreate()
 
   import spark.implicits._
 
+  /**
+    * Returns a single row DataFrame "session_run_time" as a unix_timestamp.
+    * This column can be easily added to all dataframes and provides a means for simple audit
+    * @param sessionRunTimeAttribute
+    * @return
+    */
   def getSessionRunTimeDf(
       sessionRunTimeAttribute: String = "session_run_time"
   ): (DataFrame, String) = {
     (
-      Seq(System.nanoTime()).toDF(sessionRunTimeAttribute),
+      // NH: 2/22/2021 using current unix time stamp to get the reference session time as session id
+      spark.sql(s"select unix_timestamp() as $sessionRunTimeAttribute"),
+      //  Seq(System.nanoTime()).toDF(sessionRunTimeAttribute),
       sessionRunTimeAttribute
     )
   }
@@ -37,7 +46,7 @@ object Dataframe {
   // version to use df.transform
 
   /**
-    * returns a new DataFrame with excluded columns2Exclude
+    * returns a new DataFrame excluding the list of columns columns2Exclude
     * @param dataFrame
     * @param columns2exclude
     * @return
@@ -84,7 +93,7 @@ object Dataframe {
   }
 
   /**
-    * dropColumns
+    * drops all columns in dropColumnList
     * @param dropColumnsList
     * @param dataFrame
     * @return
@@ -104,7 +113,8 @@ object Dataframe {
   }
 
   /**
-    * renaming columns recursively is not efficient but ok for now
+    * Returns a new DatFrame with columns in renameMappingList renamed
+    *  Note: renaming columns recursively is not efficient but ok for now
     * @param renameMappingList
     * @param dataFrame
     * @return
@@ -120,9 +130,61 @@ object Dataframe {
 
   implicit class Implicits(dataFrame: DataFrame) {
 
+    /**
+      * simple select the columnList
+      * @param columnList
+      * @return
+      */
     def selectList(columnList: List[String]): DataFrame = {
       val cl = s"""`${columnList.mkString("`,`")}`""".split(',')
       dataFrame.select(cl.head, cl.tail: _*)
+    }
+
+    /**
+      * returns a new DataFrame excluding the list of columns columns2Exclude
+      * @param dataFrame
+      * @param columns2exclude
+      * @return
+      */
+    def selectExclude(
+        dataFrame: DataFrame,
+        columns2exclude: List[String]
+    ): DataFrame = {
+
+      val columnList =
+        (dataFrame.schema.fieldNames.toSet &~ columns2exclude.toSet)
+        //.map{_.toLowerCase}
+        .toList
+      import org.apache.spark.sql.functions.col
+      dataFrame.select(columnList.map(col): _*)
+
+    }
+
+    /**
+      * returns the PK columns + extractions of columns following a named regex pattern
+      * @param dataFrame
+      * @param pkList
+      * @param columnsNamesRegex
+      * @return
+      */
+    def selectGroupOfColumns(
+        dataFrame: DataFrame,
+        pkList: List[String],
+        columnsNamesRegex: String
+    ): DataFrame = {
+
+      val embeddedRegex = columnsNamesRegex.r.unanchored
+      val schemaColumnList = dataFrame.schema.fieldNames.toList
+
+      val columnList = pkList ::: schemaColumnList.filter { x =>
+        x match {
+          case embeddedRegex() => true
+          case _               => false
+        }
+      }
+
+      import org.apache.spark.sql.functions.col
+      dataFrame.select(columnList.map(col): _*)
     }
 
     //need to fix the session runtime attribute to be controlled from one place
@@ -140,15 +202,27 @@ object Dataframe {
       }
 
     /**
-      *
+      * diff schema L - R
       * @param rightDF
       * @return
       */
-    def diff_schemas_p(rightDF: DataFrame): List[String] =
+    def diff_schemas(rightDF: DataFrame): List[String] =
       (dataFrame.schema.fieldNames.toSet &~ rightDF.schema.fieldNames.toSet).toList
 
     /**
-      *
+      * one-way diffs schemas
+      * @param rightDF
+      * @param direction left (default)  or right
+      * @return
+      */
+    def diffSchemas(
+        rightDF: DataFrame,
+        direction: String = "left"
+    ): List[String] =
+      (dataFrame.schema.fieldNames.toSet &~ rightDF.schema.fieldNames.toSet).toList
+
+    /**
+      * drop the list of columns
       * @param dropColumnsList
       * @return
       */
@@ -163,6 +237,7 @@ object Dataframe {
     }
 
     /**
+      * Returns a new DatFrame with columns in renameMappingList renamed
       * renaming columns recursively is not efficient if we have a large number of columns but ok for now
       * @param renameMappingList
       * @param dataFrame
@@ -174,10 +249,28 @@ object Dataframe {
         case (df, (k, v)) => df.withColumnRenamed(k, v)
       }): DataFrame
 
+    /**
+      * takes a comma-delimited string of oldColumns and corresponding newColumns, transforms to a map and applies rename
+      * @param oldColumnsString
+      * @param newColumnsString
+      * @return
+      */
+    def renameColumns(
+        oldColumnsString: String,
+        newColumnsString: String
+    ): DataFrame = {
+      // Assuming all columns are correct... But we better add a check step similar to the drop columns function
+      val oldArray: Array[String] = oldColumnsString.split(",")
+      val newArray: Array[String] = newColumnsString.split(",")
+      val ml =
+        oldArray.zip(newArray).map { case (l, r) => Map(l -> r) }.reduce(_ ++ _)
+      dataFrame.renameColumns(ml)
+    }
+
     // NH: need to merge the
     /**
-      *
-      * @param columnNamesList
+      * similar to a simple select list of columns.
+      * @param  List of columns to select
       * @return
       */
     def reorderDF(columnNamesList: List[String]): DataFrame = {
@@ -191,8 +284,8 @@ object Dataframe {
     }
 
     /**
-      *
-      * @param columnNamesString
+      * select a list of columns derived from the input string
+      * @param columnNamesString comma delimited list string of columns
       * @return
       */
     def reorderDF(columnNamesString: String): DataFrame = {
@@ -305,6 +398,7 @@ object Dataframe {
     import org.apache.spark.sql.types.{ArrayType, StructType}
 
     /**
+      * flatten a nested structured schema (like json)
       * adapted from https://www.24tutorials.com/spark/flatten-json-spark-dataframe/
       * this is not tail recursive but hopefully will not matter
       * @return
@@ -344,14 +438,14 @@ object Dataframe {
     }
 
     /**
-      *
+      * similar to flatten but keeps the arrays as is
       * @return
       */
     def flattenNoExplode: DataFrame = {
 
       val fields = dataFrame.schema.fields
       val fieldNames = fields.map(x => x.name)
-      val length = fields.length
+      // val length = fields.length
 
       for (i <- fields.indices) {
         val field = fields(i)
@@ -379,17 +473,16 @@ object Dataframe {
       final unpivot would take additional key column name and value column name
      */
     /**
+      * takes 2 lits of columns, the RHS and LHS. It keeps the LHS as is and rotates the RHS into key/value pairs
       *
-      * @param unpivotKeys
+      * @param unpivotKeys unpivot keys... the left hand side could be extracted from the schema and the unpivot column list
       * @param unpivotColumnList
       * @param keyColumn
       * @param valueColumn
       * @return
       */
     def unPivot(
-        unpivotKeys: List[
-          String
-        ], // unpivot keys (here the left hand side could be extracted from the schema and the unpivot column list
+        unpivotKeys: List[String],
         unpivotColumnList: List[String],
         keyColumn: String = "key_column",
         valueColumn: String = "value"
@@ -420,6 +513,69 @@ object Dataframe {
 
       spark.sql(q)
     }
+
+    /**
+      * rename all columns of the dataFrame so that we can save as a Parquet file
+      */
+    def rename4Parquet(): DataFrame = {
+      // need to add left/right trims and replace multiple __ with one?
+      // val r = "[ ,;{}()\n\t=]"
+      // added "." and "-" so that we skip using ``
+      val r = "[ ,;{}()\n\t=.-]"
+      spark.createDataFrame(
+        dataFrame.rdd,
+        StructType(
+          dataFrame.schema
+            .map(s =>
+              StructField(
+                s.name.trim.replaceAll(r, "__"),
+                s.dataType,
+                s.nullable
+              )
+            )
+        )
+      )
+    }
+
+    /**
+      *
+      * @param writeFolder
+      * @param fileName
+      * @param writeMode
+      * @param writeFormat
+      * @return
+      */
+    def persistAsParquet(
+        writeFolder: String,
+        fileName: String,
+        writeMode: String = "overwrite",
+        writeFormat: String = "parquet"
+    ): DataFrame =
+      if (writeFormat == "csv") {
+        dataFrame.write
+          .format(writeFormat)
+          .mode(writeMode)
+          .option("header", "true")
+          // we should support this .option("maxColumns", maxColumns)
+          .save(
+            s"$writeFolder/${fileName.split("\\.")(0)}"
+          ) // maybe force no suffixes?
+        spark.read
+          .format(writeFormat)
+          .option("header", "true")
+          .option("inferSchema", "true")
+          .load(s"$writeFolder/${fileName.split("\\.")(0)}")
+      } else { // assume only 2 options
+        dataFrame.write
+          .format(writeFormat)
+          .mode(writeMode)
+          //.option("maxColumns", maxColumns)
+          .save(s"""$writeFolder/${fileName.split("\\.")(0)}""")
+        spark.read
+          .format(writeFormat)
+          //.option("maxColumns", maxColumns)
+          .load(s"""$writeFolder/${fileName.split("\\.")(0)}""")
+      }
 
   }
 

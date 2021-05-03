@@ -32,7 +32,7 @@ object DataframeConstraints {
     * @param columnList
     * @return
     */
-  def attributeCheck(df: DataFrame, columnList: List[String]): Boolean = {
+  def attributeListCheck(df: DataFrame, columnList: List[String]): Boolean = {
     val state: Boolean =
       (columnList.toSet &~ df.schema.fieldNames.toSet).toList.isEmpty
     if (!state)
@@ -40,6 +40,25 @@ object DataframeConstraints {
         s"$columnList does not match what the schema fields are"
       ) // should change to logging
     state
+  }
+
+  /**
+    * Used to set up a series of l==r conjunctive join conditions. better that a pure dynamic sql
+    * @param leftColumnsString
+    * @param rightColumnsString
+    * @return
+    */
+  // we may want a map or Array[ as inputs
+  def buildJoinExpression(
+      leftColumnsString: String,
+      rightColumnsString: String
+  ): org.apache.spark.sql.Column = {
+    val leftArray: Array[String] = leftColumnsString.split(",")
+    val rightArray: Array[String] = rightColumnsString.split(",")
+    leftArray
+      .zip(rightArray)
+      .map { case (l, r) => col("l." + l) === col("r." + r) }
+      .reduce(_ && _)
   }
 
   /**
@@ -52,6 +71,12 @@ object DataframeConstraints {
     */
   implicit class Implicits(dataFrame: DataFrame) {
 
+    /**
+      * performs a select on a list of columns. Does not check that this lest is in the schema
+      * attributeListCheck does that
+      * @param columnList
+      * @return
+      */
     def selectList(columnList: List[String]): DataFrame = {
       // NH: 2/12/21 following should be made as a function that takes a List makes a string adding ``
       // and resplitting to support funky column names
@@ -60,18 +85,42 @@ object DataframeConstraints {
     }
 
     /**
+      * perform a join on a set of columns between 2 datasets/tables
+      * @param rightDF
+      * @param leftColumnsString
+      * @param rightColumnsString
+      * @param joinType
+      * @return
+      */
+    def dynamicJoin(
+        rightDF: DataFrame,
+        leftColumnsString: String,
+        rightColumnsString: String,
+        joinType: String = "leftouter"
+    ): DataFrame = {
+      val joinExpr = buildJoinExpression(leftColumnsString, rightColumnsString)
+      dataFrame.alias("l").join(rightDF.alias("r"), joinExpr, joinType)
+    }
+
+    /**
       * logic to check that columnList has unique values (and maybe no nulls)
       * assumes lists have been checked
       * @param columnList list of columns that are expected to constitute the PK
       * @return DataFrame of all errors or empty. Current schema is PK, count if > 0
       */
-    def pkCheck(columnNamesList: List[String]): DataFrame = {
+    def pkCheck(
+        columnNamesList: List[String],
+        passThrough: Boolean = false
+    ): DataFrame = {
       // NH: may need to add `` to the strings for non conventional attributes
-      selectList(columnNamesList)
+      val dfPK = selectList(columnNamesList)
         .groupBy(columnNamesList.head, columnNamesList.tail: _*)
         .count()
         .withColumnRenamed("count", "group_count")
         .filter(col("group_count") > 1)
+      if (passThrough)
+        dfPK // need to use dynamic join to do it... we can write this in both python or scala
+      else dfPK // return the problem records
     }
 
     /**
@@ -93,6 +142,17 @@ object DataframeConstraints {
       val tcl = s"""`${targetColumnList.mkString("`,`")}`""".split(',').toList
       val rDf = lookupDf.select(tcl.head, tcl.tail: _*)
       selectList(srcColumnNamesList).except(rDf)
+    }
+
+    def checkIfColumnListExists(
+        columnList: List[String]
+    ): (Boolean, List[String]) = {
+      val diffList: List[String] =
+        (columnList.toSet &~ dataFrame.schema.fieldNames.toSet).toList
+      // return the list of columns that do not exist
+      val state = { if (diffList.length > 0) false else true }
+      // return a boolean associated with the check and list of columns. if some are missing they would be in that list
+      (state, diffList)
     }
 
   }

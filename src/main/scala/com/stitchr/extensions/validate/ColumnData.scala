@@ -22,7 +22,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types._
 
 object ColumnData {
-  val spark: SparkSession = SparkSession.builder.getOrCreate()
+  // val spark: SparkSession = SparkSession.builder.getOrCreate()
 
   /**
     * Apply value constraint tests to columns in a dataframe
@@ -34,8 +34,16 @@ object ColumnData {
     * @param dataFrame
     */
   implicit class Implicits(dataFrame: DataFrame) {
+
+    /**
+      * checks if the column type is numeric
+      * @param columnName
+      * @return
+      */
+    //def isNumericDataType(columnName: String) (implicit spark: SparkSession): Boolean = {
     def isNumericDataType(columnName: String): Boolean = {
       val numericTypeSet = Set(
+        ByteType,
         ShortType,
         LongType,
         IntegerType,
@@ -48,9 +56,17 @@ object ColumnData {
         .asInstanceOf[Set[DataType]]).isEmpty
     }
 
+    import org.apache.spark.sql.functions._
+
+    /* need a is_numeric udf construct
+    def isNumeric(columnName: String): DataFrame = {
+      dataFrame.withColumn("is_number", expr(s"is_numeric('$columnName')"))
+    }
+     */
+
     // NH: this is not working well ...
     // using implicits within implicits seems to blow during the build
-    // import com.stitchr.extensions.transform.DataframeExtensions.Implicits
+    import com.stitchr.extensions.transform.Dataframe.Implicits
     /*
       - all values fall within a range, lower bound, upper bound,
       -- category list that is not available as a database table or from an api
@@ -153,8 +169,20 @@ object ColumnData {
       */
     import org.apache.spark.sql.expressions.UserDefinedFunction
 
-    def checkFunction(columnName: String, f: UserDefinedFunction): DataFrame = {
-      dataFrame.withColumn("match_key", f(col(columnName)))
+    /**
+      * general pupose function-bsed checker. The function f is applied to all values of a column
+      *  and results stored in the new column checkField
+      * @param columnName
+      * @param f
+      * @param checkField
+      * @return
+      */
+    def checkFunction(
+        columnName: String,
+        f: UserDefinedFunction,
+        checkField: String = "check_field"
+    ): DataFrame = {
+      dataFrame.withColumn(checkField, f(col(columnName)))
     }
 
     /**
