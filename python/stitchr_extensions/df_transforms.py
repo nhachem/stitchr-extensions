@@ -10,9 +10,10 @@ from stitchr_extensions.wrangle import *
 # import typing
 
 import pyspark
-from pyspark.sql.types import StructField, StructType, ArrayType
-from pyspark.sql.functions import col
+from pyspark.sql.types import StructField, StructType, ArrayType, MapType
+from pyspark.sql.functions import col, concat, lit
 from pyspark.sql.dataframe import DataFrame
+import pyspark.sql.functions as f
 
 # import typing_extensions
 
@@ -134,6 +135,7 @@ def rename_column(df: DataFrame, existing: str, new: str) -> DataFrame:
     This is a no-op if schema doesn't contain the given column name.
     Effectively a wrapper over withColumnRenamed
 
+    :param df:
     :rtype: object
     :param existing: string, name of the existing column to rename.
     :param new: string, new name of the column.
@@ -156,12 +158,12 @@ def rename_4_parquet(df: DataFrame) -> DataFrame:
     # regex = r"[ ,;{}()\n\t=.-]"
     regex = r"[ ,;{}()\n\t=.-/]"
     delimiter = '__'
-    f = df.schema.fields
+    schema_fields = df.schema.fields
     return spark.createDataFrame(
         df.rdd,
         StructType(
             [StructField(re.sub(regex, delimiter, sf.name.replace(' ', '')), sf.dataType, sf.nullable) for sf in
-             f]
+             schema_fields]
             )
        )
 
@@ -183,14 +185,14 @@ def unpivot(df: DataFrame, unpivot_keys: list,
     stack_fields_array = unpivot_column_list
     # we need to cast to STRING as we may have int, double , etc... we would couple this with extracting the types
     pivot_map_list = [f"'{s.replace('`', '')}', STRING({(s)}) " for s in stack_fields_array]
-    stack_fields = f"stack({len(stack_fields_array)},{','.join([str(x) for x in pivot_map_list])})"
-    df.createOrReplaceTempView("_unpivot")
+    stack_fields: str = f"stack({len(stack_fields_array)},{','.join([str(x) for x in pivot_map_list])})"
+    df.createOrReplaceTempView('_unpivot')
     q = f"select {','.join([str(x) for x in unpivot_keys])}, {stack_fields} as (`{key_column}`, `{value_column}`) from _unpivot"
     # replace with logging ... print(f'''query is: {q} \n''')
     return spark.sql(q)
 
 
-def flatten(data_frame: DataFrame) -> DataFrame:
+def flatten0(data_frame: DataFrame) -> DataFrame:
     """
     NH: Experimental
     :param data_frame:
@@ -204,22 +206,51 @@ def flatten(data_frame: DataFrame) -> DataFrame:
         field_type = field.dataType
         field_name = field.name
         # print(f'{field}, {field_name}, {field_type}')
+        # we have the case of MapTYpe to handle or isinstance(field_type, MapType)):
+        # this means when we see a map we treat as array and add key/value columns?!
         if isinstance(field_type, ArrayType):
             field_names_excluding_array = [fn for fn in field_names if fn != field_name]
             field_names_to_select = field_names_excluding_array + [
                 f"explode_outer({field_name}) as {field_name}"]
             # exploded_df = exploded_df.selectExpr(*field_names_to_select)
-            # return flatten(exploded_df)
-            return flatten(data_frame.selectExpr(*field_names_to_select))
+            # return flatten0(exploded_df)
+            return flatten0( data_frame.selectExpr(*field_names_to_select))
+        elif isinstance(field_type, MapType):
+            """
+            This is quite expensive if we do not have a known enumeration of key. 
+            From https://stackoverflow.com/questions/52762487/flattening-maptype-column-in-pyspark
+            df.withColumn("id", f.monotonically_increasing_id())\
+            .select("id", f.explode("a"))\
+            .groupby("id")\
+            .pivot("key")\
+            .agg(f.first("value"))\
+            .drop("id")\
+            In this case, we need to create an id column first so that there's something to group by.
+            The pivot here can be expensive, depending on the size of your data.
+            """
+            """
+            This solution here outputs a cartesian on each mapped field... 
+            Using a pivot like above is better but very expensive
+            posexplode does not work so we add an increasing id that we can control
+            """
+            df_mapped = data_frame \
+                .withColumn("id", f.monotonically_increasing_id()) \
+                .select('*', f.explode(field_name)) \
+                .withColumnRenamed("key", f"{field_name}__key_column") \
+                .withColumnRenamed("value", f"{field_name}__value") \
+                .withColumnRenamed("id", f"{field_name}__id").drop(field_name)
+
+            return flatten0( df_mapped )
+            # return data_frame
         elif isinstance(field_type, StructType):
             child_fieldnames = [f"{field_name}.{child.name}" for child in field_type]
             new_fieldnames = [fn for fn in field_names if fn != field_name] + child_fieldnames
             renamed_cols = [col(x).alias(x.replace(".", "__")) for x in new_fieldnames]
             # exploded_df = exploded_df.select(*renamed_cols)
             # print(len(exploded_df.schema.fieldNames()))
-            # return flatten(exploded_df)
-            return flatten(data_frame.select(*renamed_cols))
-    # print(f'schema size is {len(data_frame.schema.fieldNames())}')
+            # return flatten0(exploded_df)
+            return flatten0( data_frame.select(*renamed_cols) )
+    # print(f"schema size is {len(data_frame.schema.fieldNames())}")
     return data_frame
 
 
@@ -251,6 +282,62 @@ def flatten_no_explode(data_frame: DataFrame) -> DataFrame:
     # print(f'schema size is {len(data_frame.schema.fieldNames())}')
     return data_frame
 
+
+def flatten(data_frame: DataFrame, mode: str = 'full', delimiter: str = '__') -> DataFrame:
+    # cases are full means full explode.
+    #           struct only structs,
+    #           map will unwind the maps as a pivot and a group by + structs
+    #           array will effectively do struct and arrays only (with explode not positional)
+    fields: StructType = data_frame.schema.fields
+    field_names: list = data_frame.schema.fieldNames()
+    for index, value in enumerate(fields):
+        field = value
+        field_type = field.dataType
+        field_name = field.name
+        # print(f'{field}, {field_name}, {field_type}, {mode}')
+        if isinstance(field_type, ArrayType) and mode in ['array', 'full']:
+            field_names_excluding_array = [fn for fn in field_names if fn != field_name]
+            field_names_to_select = field_names_excluding_array + [
+                f"explode_outer({field_name}) as {field_name}"]
+            # exploded_df = exploded_df.selectExpr(*field_names_to_select)
+            # return flatten0(exploded_df)
+            return flatten(data_frame.selectExpr(*field_names_to_select), mode, delimiter)
+        elif isinstance(field_type, MapType) and mode in ['map', 'full']:
+            """
+            This is quite expensive if we do not have a known enumeration of key. 
+            Adapted from https://stackoverflow.com/questions/52762487/flattening-maptype-column-in-pyspark
+            In this case, we need to create an id column first so that there's something to group by.
+            The pivot here can be expensive, depending on the size of your data.
+            posexplode does not work as the pos is associated with a key and value independently.
+            so we add an increasing id that we can control
+            """
+            df_left: DataFrame = data_frame \
+                .withColumn("id", f.monotonically_increasing_id())
+            # print(f"{df_left.count()}")
+            # df_left.printSchema()
+            df_mapped = df_left \
+                .select("id", f.explode(field_name)) \
+                .withColumn("key1", concat(lit(f"{field_name}{delimiter}"), col("key"))) \
+                .drop("key") \
+                .groupby("id") \
+                .pivot("key1") \
+                .agg(f.first('value')) \
+                .withColumnRenamed("id", "id_right")
+            # print(f"{df_mapped.count()}")
+            # df_mapped.printSchema()
+            df_flat: DataFrame = df_left.join(df_mapped, df_left.id == df_mapped.id_right, "inner") \
+                .drop("id").drop("id_right").drop(field_name)
+            return flatten(df_flat, mode, delimiter)
+        elif isinstance(field_type, StructType):
+            child_fieldnames = [f"{field_name}.{child.name}" for child in field_type]
+            new_fieldnames = [fn for fn in field_names if fn != field_name] + child_fieldnames
+            renamed_cols = [col(x).alias(x.replace(".", delimiter)) for x in new_fieldnames]
+            # exploded_df = exploded_df.select(*renamed_cols)
+            # print(len(exploded_df.schema.fieldNames()))
+            # return flatten0(exploded_df)
+            return flatten(data_frame.select( *renamed_cols), mode, delimiter)
+    # print(f'schema size is {len(data_frame.schema.fieldNames())}')
+    return data_frame
 
 @property
 def get_random_string(length: int) -> str:

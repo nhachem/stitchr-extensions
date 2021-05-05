@@ -17,8 +17,9 @@
 package com.stitchr.extensions.transform
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions.expr
-import org.apache.spark.sql.types.StructField
+// import org.apache.spark.sql.functions.{expr, col, monotonically_increasing_id, explode}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.{StructField, StructType, ArrayType, MapType}
 
 object Dataframe {
   val spark: SparkSession = SparkSession.builder.getOrCreate()
@@ -182,8 +183,6 @@ object Dataframe {
           case _               => false
         }
       }
-
-      import org.apache.spark.sql.functions.col
       dataFrame.select(columnList.map(col): _*)
     }
 
@@ -393,17 +392,14 @@ object Dataframe {
 
     // from https://www.24tutorials.com/spark/flatten-json-spark-dataframe/
     // this is not tail recursive but hopefully will not matter
-    import org.apache.spark.sql.DataFrame
-    import org.apache.spark.sql.functions.col
-    import org.apache.spark.sql.types.{ArrayType, StructType}
 
     /**
-      * flatten a nested structured schema (like json)
+      * flatten0 a nested structured schema (like json)
       * adapted from https://www.24tutorials.com/spark/flatten-json-spark-dataframe/
       * this is not tail recursive but hopefully will not matter
       * @return
       */
-    def flatten: DataFrame = {
+    def flatten0: DataFrame = {
 
       val fields = dataFrame.schema.fields
       val fieldNames = fields.map(x => x.name)
@@ -420,17 +416,90 @@ object Dataframe {
             )
             // val fieldNamesToSelect = (fieldNamesExcludingArray ++ Array(s"$fieldName.*"))
             val explodedDf = dataFrame.selectExpr(fieldNamesAndExplode: _*)
-            return explodedDf.flatten
+            return explodedDf.flatten0
           case structType: StructType =>
-            val childFieldnames = structType.fieldNames.map(childname =>
-              fieldName + "." + childname
+            val childFieldnames = structType.fieldNames.map(childName =>
+              fieldName + "." + childName
+            )
+            val newFieldNames =
+              fieldNames.filter(_ != fieldName) ++ childFieldnames
+            val renamedcols =
+              newFieldNames.map(x => col(x).as(x.replace(".", "__")))
+            val explodeDf = dataFrame.select(renamedcols: _*)
+            return explodeDf.flatten0
+          case _ =>
+        }
+      }
+      dataFrame
+    }
+
+    def flatten(mode: String = "full", delimiter: String = "__"): DataFrame = {
+      /* 3 options:
+      full --> flattens everything
+      struct --> flatten only struct
+      array --> flattens array + struct
+      map --> technically flattens map + struct but read note below on MapType
+       */
+      val fields = dataFrame.schema.fields
+      val fieldNames = fields.map(x => x.name)
+
+      for (i <- fields.indices) {
+        val field = fields(i)
+        val fieldType = field.dataType
+        val fieldName = field.name
+        fieldType match {
+          case arrayType: ArrayType =>
+            if (List("full", "array").contains(mode)) {
+              val fieldNamesExcludingArray = fieldNames.filter(_ != fieldName)
+              val fieldNamesAndExplode = fieldNamesExcludingArray ++ Array(
+                s"explode_outer($fieldName) as $fieldName"
+              )
+              // val fieldNamesToSelect = (fieldNamesExcludingArray ++ Array(s"$fieldName.*"))
+              return dataFrame
+                .selectExpr(fieldNamesAndExplode: _*)
+                .flatten(mode, delimiter)
+            }
+          /*
+             seems that maps in python become struct in scala so testing is tricky...
+             may need to make up a special test case
+             scala reads data as struct instead of maps… a little tricky.
+             Maybe in python I can treat map type and structType similarly?
+          case
+           */
+          case mapType: MapType =>
+            if (List("full", "map").contains(mode)) {
+              val leftDf: DataFrame =
+                dataFrame.withColumn("id", monotonically_increasing_id())
+              val mappedDf = leftDf
+                .select(col("id"), explode(col(fieldName)))
+                .withColumn(
+                  "key1",
+                  concat(lit(s"${fieldName}$delimiter"), col("key"))
+                )
+                .drop("key")
+                .groupBy("id")
+                .pivot("key1")
+                .agg(first(col("value")))
+                .withColumnRenamed("id", "id_right")
+              val flatDf: DataFrame = leftDf
+                .join(mappedDf, leftDf("id") === mappedDf("id_right"), "inner")
+                .drop("id")
+                .drop("id_right")
+                .drop(fieldName)
+              return flatDf
+                .flatten(mode, delimiter)
+            }
+          case structType: StructType =>
+            val childFieldnames = structType.fieldNames.map(childName =>
+              fieldName + "." + childName
             )
             val newfieldNames =
               fieldNames.filter(_ != fieldName) ++ childFieldnames
-            val renamedcols =
-              newfieldNames.map(x => col(x).as(x.replace(".", "__")))
-            val explodeDf = dataFrame.select(renamedcols: _*)
-            return explodeDf.flatten
+            val renamedColumns =
+              newfieldNames.map(x => col(x).as(x.replace(".", delimiter)))
+            return dataFrame
+              .select(renamedColumns: _*)
+              .flatten(mode, delimiter)
           case _ =>
         }
       }
@@ -438,7 +507,7 @@ object Dataframe {
     }
 
     /**
-      * similar to flatten but keeps the arrays as is
+      * similar to flatten0 but keeps the arrays as is
       * @return
       */
     def flattenNoExplode: DataFrame = {
@@ -452,7 +521,7 @@ object Dataframe {
         val fieldtype = field.dataType
         val fieldName = field.name
         fieldtype match {
-          // only handle strycttype and skip arrays
+          // only handle structType and skip arrays
           case structType: StructType =>
             val childFieldnames = structType.fieldNames.map(childname =>
               fieldName + "." + childname

@@ -1,4 +1,4 @@
-{
+[{
     "firstName": "Rack",
     "lastName": "Jackon",
     "gender": "man",
@@ -13,4 +13,4 @@
         {"type": "home", "number": "7383627627"},
         {"type": "cell", "number": "7745555555"}
     ]
-}
+}]
